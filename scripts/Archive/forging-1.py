@@ -1,0 +1,108 @@
+#!/usr/bin/env python
+
+# ROS
+import rospy
+
+# ROS Structures
+from geometry_msgs.msg import Pose
+from capsen_vision.srv import SetProperty, MoveLinkToPose
+
+print("Hello World!")
+
+
+
+######################
+## Global Variables ##
+######################
+
+POSITION_NAMES = [
+  'tucked_home',
+  'wristup_home',
+  'wristup_furnace_front',
+  'wristup_furnace_pick',
+  'wristup_furnace_lift',
+  'wristup_furnace_withdrawn',
+  'press_top',
+]
+
+
+
+#############
+## Classes ##
+#############
+
+class ForgingClient:
+
+  def __init__(self):
+    self._move_to_joint_positions_client = rospy.ServiceProxy(
+        '/planner/set_mode_service', SetProperty)
+
+    self._move_link_to_pose_client = rospy.ServiceProxy(
+        '/planner/move_link_to_pose_service', MoveLinkToPose)
+
+  def move_home(self):
+    response = self._move_to_joint_positions_client(type=0)
+
+    if response.error:
+      print("failed to move home: %s"%response.error)
+
+  def move_to_position_names(self):
+    # Make a separate call to the service for each position in the list.
+    # The service will block this thread until it either fails or finishes
+    # moving to the desired location.
+    for position_name in POSITION_NAMES:
+      response = self._move_to_joint_positions_client(
+          type=1, name=position_name)
+
+      if response.error:
+        print("failed to move to joint position: %s"%response.error)
+        break
+
+  def move_to_scanning_positions(self):
+    response = self._move_to_joint_positions_client(type=2)
+
+    if response.error:
+      print("failed to move home: %s"%response.error)
+
+  def move_scanning_object_to_pose(self):
+    pose = Pose()
+    pose.position.x = .5
+    pose.position.y = -.6
+    pose.position.z = .4
+    pose.orientation.x = -0.611
+    pose.orientation.y = 0.353
+    pose.orientation.z = -0.38
+    pose.orientation.w = 0.6
+
+    response = self._move_link_to_pose_client(link="object_link", pose=pose)
+
+    if response.error:
+      print("failed to move object to pose: %s"%response.error)
+
+
+def main():
+  # service for moving to pre-recorded joint positions
+  # type = 0: move to home position recorded in planner.yaml
+  # type = 1: move to a position name which exists in action_locations.csv
+  # type = 2: move to the series of scanning positions and generate the mesh.
+  #           the scanning positions are saved as "in_hand_scanning_positions"
+  #           in action_locations.csv
+  rospy.wait_for_service('/planner/set_mode_service')
+
+  # service for moving the scanned object to a pose relative to the robot
+  rospy.wait_for_service('/planner/move_link_to_pose_service')
+
+  forging_client = ForgingClient()
+
+  try:
+#    forging_client.move_home()
+#    forging_client.move_to_position_names()
+#    forging_client.move_to_scanning_positions()
+    forging_client.move_scanning_object_to_pose()
+
+  except rospy.ServiceException as e:
+    print("service call faild: %s"%e)
+
+
+if __name__ == "__main__":
+  main()
