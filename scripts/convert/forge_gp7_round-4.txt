@@ -238,21 +238,12 @@ class Press():
       self.halt_press()
       # raise ValueError('Press timeout before target reached', time.time(), start_time, timeout)
 
-  def press_down_in_steps_with_relative_force_fb(self, target):
+  def press_down_in_steps_with_force_fb(self, target):
     # This function breaks a single press target position into multiple steps, calling relieve forces after each step
     # Requires that the target position is lower (higher position value) than current position
-
-    # step_dist is the amount that the press is moved down with each step
-    step_dist = .001
+    step_dist = .0005
     start_time = time.time()
     timeout = 30
-
-    fx_tare = copy.deepcopy(ft_sensor.force.x)
-    fy_tare = copy.deepcopy(ft_sensor.force.y)
-    fz_tare = copy.deepcopy(ft_sensor.force.z)
-    tx_tare = copy.deepcopy(ft_sensor.torque.x)
-    ty_tare = copy.deepcopy(ft_sensor.torque.y)
-    tz_tare = copy.deepcopy(ft_sensor.torque.z)
 
     if self.power_switch_state == False:
       raise ValueError("Cannot execute press command with power switch off")
@@ -279,7 +270,7 @@ class Press():
       
       while (step_target > self.position()) and (time.time() - start_time < timeout):
         try: 
-          forging_client.relieve_relative_forces(fx_tare, fy_tare, fz_tare, tx_tare, ty_tare, tz_tare)
+          forging_client.relieve_relative_forces()
         except ValueError as err:
           self.halt_press()
           print(err.args)
@@ -674,7 +665,7 @@ class ForgingClient:
     
     rospy.loginfo("relieve_forces succeeded")
 
-  def relieve_relative_forces(self, fx_tare, fy_tare, fz_tare, tx_tare, ty_tare, tz_tare):
+  def relieve_relative_forces(self, fx_start, fy_start, fz_start, tx_start, ty_start, tz_start):
     rospy.loginfo("Reached relieve relative forces")
     if not ft_sensor.is_publishing():
       raise ValueError("relieve_relative_forces determined that ft sensor not publishing")
@@ -687,16 +678,7 @@ class ForgingClient:
     tx = ft_sensor.torque.x
     ty = ft_sensor.torque.y
     tz = ft_sensor.torque.z
-
-    fx_net = fx - fx_tare
-    fy_net = fy - fy_tare
-    fz_net = fz - fz_tare
-    tx_net = tx - tx_tare
-    ty_net = ty - ty_tare
-    tz_net = tz - tz_tare
-
     rospy.loginfo("Start: fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-
 
     # will attempt to adjust robot pose by dist_increment if between lower and upper threshold
     # will raise error if above upper threshold
@@ -707,9 +689,9 @@ class ForgingClient:
     dist_increment = .0005
 
     # Check upper thresholds and raise error if exceeded
-    if (abs(fx_net) > upper_force_threshold) or (abs(fy_net) > upper_force_threshold) or (
-      abs(fz_net) > upper_force_threshold or abs(tx_net) > upper_torque_threshold) or (
-      abs(ty_net) > upper_torque_threshold) or (abs(tz_net) > upper_torque_threshold):
+    if (abs(fx - fx_start) > upper_force_threshold) or (abs(fy - fy_start) > upper_force_threshold) or (
+      abs(fz - fz_start) > upper_force_threshold or abs(tx - tx_start) > upper_torque_threshold) or (
+      abs(ty - ty_start) > upper_torque_threshold) or (abs(tz - tz_start) > upper_torque_threshold):
         rospy.loginfo("fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
         raise ValueError("relieve_relative_forces error: exceeded upper force limit") 
 
@@ -722,42 +704,23 @@ class ForgingClient:
     
     # initialize move_list to ensure we enter while loop
     move_list = [1]
-
-    x_neg_success = True
-    x_pos_success = True
-    y_neg_success = True
-    y_pos_success = True
-    z_neg_success = True
-    z_pos_success = True
-
-    # Continue checking and relieving forces until relieved or relief moves fail to provide relief
     while 1 in move_list or -1 in move_list:
-
-      # record starting forces and torques for later comparison
-      fx_start = copy.deepcopy(fx)
-      fy_start = copy.deepcopy(fy)
-      fz_start = copy.deepcopy(fz)
-      tx_start = copy.deepcopy(tx)
-      ty_start = copy.deepcopy(ty)
-      tz_start = copy.deepcopy(tz)
-
-      # determine relief directions
-      # consider whether last attempt to relieve actually relieved forces
-      if (fx_net < -lower_force_threshold) and x_neg_success:
+      # determine relief directions   
+      if (fx - fx_start < -lower_force_threshold):
         x_dir = -1
-      elif (fx_net > lower_force_threshold) and x_pos_success:
+      elif (fx - fx_start > lower_force_threshold):
         x_dir = 1
       else:
         x_dir = 0
-      if (fy_net < -lower_force_threshold) and y_neg_success:
+      if (fy - fy_start < -lower_force_threshold):
         y_dir = -1
-      elif (fy_net > lower_force_threshold) and y_pos_success:
+      elif (fy - fy_start > lower_force_threshold):
         y_dir = 1
       else:
         y_dir = 0
-      if (fz_net < -lower_force_threshold) and z_neg_success:
+      if (fz - fz_start < -lower_force_threshold):
         z_dir = -1
-      elif (fz_net > lower_force_threshold) and z_pos_success:
+      elif (fz - fx_start > lower_force_threshold):
         z_dir = 1
       else:
         z_dir = 0
@@ -774,43 +737,11 @@ class ForgingClient:
         except ValueError as err:
           print(err.args)
           raise ValueError("relieve_relative_forces failed to move scanning object to desired pose")
-        
-        # Check whether the move actually relieved force as intended
-        if x_dir == -1:
-          x_neg_success = (fx_net - fx_start) > 0
-          x_pos_success = True
-        elif x_dir == 1:
-          x_pos_success = (fx_net - fx_start) < 0
-          x_neg_success = True
-        else:
-          x_neg_success = True
-          x_pos_success = True
-
-        if y_dir == -1:
-          y_neg_success = (fy_net - fy_start) > 0
-          y_pos_success = True
-        elif y_dir == 1:
-          y_pos_success = (fy_net - fy_start) < 0
-          y_neg_success = True
-        else:
-          y_neg_success = True
-          y_pos_success = True
-
-        if z_dir == -1:
-          z_neg_success = (fz_net - fz_start) > 0
-          z_pos_success = True
-        elif z_dir == 1:
-          z_pos_success = (fz_net - fz_start) < 0
-          z_neg_success = True
-        else:
-          z_neg_success = True
-          z_pos_success = True
-
+        else:    
+          rospy.loginfo("relieve_relative_forces succeeded")
 
       else:
-        # no forces present to be relieved or all attempts to relieve have failed
-        # will now exit method
-
+        # no forces present that need to be relieved
         # rospy.loginfo("No forces to relieve")
         pass
 

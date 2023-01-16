@@ -1,3 +1,16 @@
+#!/usr/bin/env python
+#
+# Software License Agreement (Apache 2.0 License)
+# Copyright (c) 2022, The Ohio State University
+# The Artificially Intelligent Manufacturing Systems Lab (AIMS)
+#
+# Author: W. Hansen, M. Groeber, A. Buynak
+
+# Description:
+#
+#
+
+# Utilities
 import os
 import sys
 import math
@@ -7,6 +20,7 @@ import tf
 import copy
 import numpy as np
 import h5py
+import subprocess
 from geometry_msgs.msg import Pose, Point, PoseArray, WrenchStamped, Quaternion
 from std_msgs.msg import Header
 from std_msgs.msg import Float64
@@ -15,6 +29,62 @@ from sensor_msgs.msg import JointState
 from sensor_msgs.msg import Temperature
 from capsen_vision.srv import SetProperty, MoveLinkToPose
 from tf.transformations import *
+
+#####################
+# Global Parameters
+POSITION_NAMES = [
+  'tucked_home',
+  'wristup_home',
+  'wristup_furnace_front',
+  'wristup_furnace_pick',
+  'wristup_furnace_lift',
+  'wristup_furnace_withdrawn',
+  'press_top',
+]
+
+press_down_timeout = 7
+press_up_timeout = 5
+press_down_tolerance = .001
+press_up_tolerance = .005
+
+def close_gripper():
+    try:
+        forging_client.set_io("GRIP", True) # close gripper
+        time.sleep(1)
+    except rospy.ServiceException as e:
+        print("service call faild: %s"%e)
+    
+def open_gripper():
+    try:
+        forging_client.set_io("GRIP", False) # open gripper
+        time.sleep(1)
+    except rospy.ServiceException as e:
+        print("service call faild: %s"%e)
+  
+def open_furnace():
+  forging_client.set_io("DOOR", True)
+  time.sleep(1)
+
+def close_furnace():
+  forging_client.set_io("DOOR", False)
+  time.sleep(1)
+
+def pose_from_incremental_move(start_pose, dx, dy, dz, drx, dry, drz):
+  # expecting start_pose to be type geometry_msgs/Pose with point, quaternion representation
+  # expecting dx, dy, dz to be incremental step in meters
+  # expecting drx, dry, drz to be incremental rotations in degrees
+  end_pose = Pose()
+  end_pose.position.x = start_pose.position.x + dx
+  end_pose.position.y = start_pose.position.y + dy
+  end_pose.position.z = start_pose.position.z + dz
+  # convert degrees to radians
+  drx = drx*math.pi/180
+  dry = dry*math.pi/180
+  drz = drz*math.pi/180
+  q_rot = quaternion_from_euler(drx, dry, drz, "sxyz")
+  quaternion_start = [start_pose.orientation.x, start_pose.orientation.y, start_pose.orientation.z, start_pose.orientation.w]
+  end_pose.orientation = quaternion_multiply(q_rot, quaternion_start)
+  return end_pose
 
 class ForgingClient:
 
@@ -25,9 +95,6 @@ class ForgingClient:
     self._move_link_to_pose_client = rospy.ServiceProxy(
         '/planner/move_link_to_pose_service', MoveLinkToPose)
 
-    self._set_gripper_state_client = rospy.ServiceProxy(
-        '/planner/set_gripper_state_service', SetProperty)
-
     self._set_io_client = rospy.ServiceProxy(
         '/planner/set_io_service', SetProperty)
 
@@ -35,8 +102,7 @@ class ForgingClient:
         '/planner/set_collision_checking_service', SetProperty)
 
   def set_io(self, name, activate):
-    # `name` must match the second column of exactly one of the rows in
-    # io_map.csv
+    # name must match the second column of exactly one of the rows in io_map.csv
     response = self._set_io_client(name=name, on_off=activate)
 
     if response.error:
@@ -48,6 +114,19 @@ class ForgingClient:
 
     if response.error:
       print("failed to set collision checking: %s"%response.error)
+      
+  def move_home(self, speed):
+    """
+    Parameters
+    ----------
+    speed : float
+      A decimal value in [0,1] that commands the robot speed as a proportion of
+      its max speed
+    """
+    response = self._move_to_joint_positions_client(type=0, abs_value=speed)
+
+    if response.error:
+      print("failed to move home: %s"%response.error)
 
   def move_incremental(self, dx, dy, dz):
     try:
@@ -56,17 +135,58 @@ class ForgingClient:
       print(err.args)
       raise ValueError('move_incremental unable to determine current pose')
     
+    move_speed = 0.01
     target_pose.position.x += dx
     target_pose.position.y += dy
     target_pose.position.z += dz
     try:
-      self.move_scanning_object_to_pose(target_pose)
+      self.move_scanning_object_to_pose(move_speed, target_pose)
     except ValueError as err:
       print(err.args)
       raise ValueError('move_incremental failed to move robot as expected')
 
-  def move_scanning_object_to_pose(self, pose, speed):
-    response = self._move_link_to_pose_client(link="object_link", pose=pose, speed=speed)
+  def move_to_position_names(self, speed):
+    """
+    Parameters
+    ----------
+    speed : float
+      A decimal value in [0,1] that commands the robot speed as a proportion of
+      its max speed
+    """
+    # Make a separate call to the service for each position in the list.
+    for position_name in POSITION_NAMES:
+      response = self._move_to_joint_positions_client(
+          type=1, name=position_name, abs_value=speed)
+
+      if response.error:
+        print("failed to move to joint position: %s"%response.error)
+        break
+
+  def move_to_scanning_positions(self, speed):
+    """
+    Parameters
+    ----------
+    speed : float
+      A decimal value in [0,1] that commands the robot speed as a proportion of
+      its max speed
+    """
+    response = self._move_to_joint_positions_client(
+        type=2, val_a=50, abs_value=speed)
+
+    if response.error:
+      print("failed to move to scanning positions: %s"%response.error)
+
+  def move_scanning_object_to_pose(self, speed, pose):
+    """
+    Parameters
+    ----------
+    speed : float
+      A decimal value in [0,1] that commands the robot speed as a proportion of
+      its max speed
+
+    pose : geometry_msgs/Pose.msg
+    """
+    response = self._move_link_to_pose_client(link="object_link", pose=pose, abs_value=speed)
 
     if response.error:
       print("failed to move object to pose: %s"%response.error)
@@ -122,31 +242,27 @@ class ForgingClient:
       return pose
     except:
       raise ValueError('Get_current_pose failed')
-
-def pose_from_incremental_move(start_pose, dx, dy, dz, drx, dry, drz):
-    # expecting start_pose to be type geometry_msgs/Pose with point, quaternion representation
-    # expecting dx, dy, dz to be incremental step in meters
-    # expecting drx, dry, drz to be incremental rotations in degrees
-    end_pose = Pose()
-    end_pose.position.x = start_pose.position.x + dx
-    end_pose.position.y = start_pose.position.y + dy
-    end_pose.position.z = start_pose.position.z + dz
-    # convert degrees to radians
-    drx = drx*math.pi/180
-    dry = dry*math.pi/180
-    drz = drz*math.pi/180
-    q_rot = quaternion_from_euler(drx, dry, drz, "sxyz")
-    quaternion_start = [start_pose.orientation.x, start_pose.orientation.y, start_pose.orientation.z, start_pose.orientation.w]
-    end_pose.orientation = quaternion_multiply(q_rot, quaternion_start)
-    return end_pose
+  
 
 # Initialize
 rospy.init_node('forge_gp7_node')
+
 forging_client = ForgingClient()
 
-def main():
 
-  rospy.loginfo("Waiting for services")
+########
+# Main #
+########
+
+def main():
+  # service for moving to pre-recorded joint positions
+  # type = 0: move to home position recorded in planner.yaml
+  # type = 1: move to a position name which exists in action_locations.csv
+  # type = 2: move to the series of scanning positions and generate the mesh.
+  #           the scanning positions are saved as "in_hand_scanning_positions"
+  #           in action_locations.csv
+
+  rospy.wait_for_service('/planner/set_mode_service')
 
   # service for moving the scanned object to a pose relative to the robot
   rospy.wait_for_service('/planner/move_link_to_pose_service')
@@ -157,38 +273,8 @@ def main():
   # enable or disable collision checking for a specified link
   rospy.wait_for_service('/planner/set_collision_checking_service')
 
-  rospy.loginfo("Done waiting for services")
-
-  # with h5py.File('IncrementalFormingSimulationTest2.hdf5', 'r') as f:
-  #   dset = f['poses']
-  #   for data in dset:
-  #     print("Pose from hdf5 file: ", data)
-
-  #     pose1 = Pose()
-  #     pose1.position.x = 0.973 - (data[2] / 1000)
-  #     pose1.position.y = -0.176 - (data[1] / 1000)
-  #     pose1.position.z = 0.200 - (data[0] / 1000)
-  #     pose1.orientation.x = data[3]
-  #     pose1.orientation.y = data[4]
-  #     pose1.orientation.z = data[5]
-  #     pose1.orientation.w = data[6]
-
-  #     print("Calculated pose: ", pose1)
-  #     time.sleep(5)
-  #     forging_client.move_scanning_object_to_pose(pose1)
-  #     time.sleep(3)
-  
-  # pose2 = pose_from_incremental_move(pose1, 0, 0, 0, 90, 0, 0)
-  # print("pose2 = {}".format(pose2))
-
-  pose1 = forging_client.get_current_pose()
-  print(pose1)
-  pose1.orientation.x = 0.0
-  pose1.orientation.y = 0.0
-  pose1.orientation.z = 0.0
-  pose1.orientation.w = 1.0
-  forging_client.move_scanning_object_to_pose(pose1, 0.03)
+  forging_client.move_to_scanning_positions(0.03)
+ 
 
 if __name__ == "__main__":
-  
   main()
