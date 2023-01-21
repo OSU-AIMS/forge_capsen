@@ -60,7 +60,7 @@ class ForgingClient:
     target_pose.position.y += dy
     target_pose.position.z += dz
     try:
-      self.move_scanning_object_to_pose(target_pose)
+      self.move_scanning_object_to_pose(target_pose, .03)
     except ValueError as err:
       print(err.args)
       raise ValueError('move_incremental failed to move robot as expected')
@@ -99,6 +99,7 @@ class ForgingClient:
 
       time.sleep(0.01)
     
+
     if (time.time() - start_time) >= timeout:
       raise ValueError('Timeout moving to object pose')
     else:
@@ -175,19 +176,22 @@ def main():
 
   #     print("Calculated pose: ", pose1)
   #     time.sleep(5)
-  #     forging_client.move_scanning_object_to_pose(pose1)
+  #     forging_client.move_scanning_object_to_pose(pose1, .03)
   #     time.sleep(3)
   
   # pose2 = pose_from_incremental_move(pose1, 0, 0, 0, 90, 0, 0)
   # print("pose2 = {}".format(pose2))
 
+  pose1 = Pose()
+
   pose1 = forging_client.get_current_pose()
   print(pose1)
-  pose1.orientation.x = 0.0
-  pose1.orientation.y = 0.0
-  pose1.orientation.z = 0.0
-  pose1.orientation.w = 1.0
-  forging_client.move_scanning_object_to_pose(pose1, 0.03)
+  # pose1.position.x -= 0.100
+  # pose1.orientation.x = 0.0
+  # pose1.orientation.y = 0.0
+  # pose1.orientation.z = 0.0
+  # pose1.orientation.w = 1.0
+  # forging_client.move_scanning_object_to_pose(pose1, 0.03)
 
 if __name__ == "__main__":
   

@@ -39,13 +39,14 @@ POSITION_NAMES = [
   'wristup_furnace_pick',
   'wristup_furnace_lift',
   'wristup_furnace_withdrawn',
+  'press_approach_joints'
 ]
 
 press_down_timeout = 7
 press_up_timeout = 5
 press_down_tolerance = .001
 press_up_tolerance = .005
-press_top = 0.0
+press_top = 0.020
 
 def close_gripper():
     try:
@@ -96,11 +97,10 @@ class PressSchedule():
     self.maxZs = []
 
   def read_hdf5_file(self):
-    with h5py.File('IncrementalFormingFullRun.hdf5', 'r') as f:
+    with h5py.File('/home/capsen/ws_forge/src/D3D_planning/IncrementalForming_HitSequence.hdf5', 'r') as f:
+
       keepPressing_dataset = f['keepPressing']
-      if keepPressing_dataset[0] == False:
-        rospy.loginfo("Pressing complete!")
-        raise SystemExit
+      self.keep_pressing = keepPressing_dataset[0]
 
       pose_dataset = f['poses']
       for data in pose_dataset:
@@ -129,13 +129,12 @@ class PressSchedule():
         self.minZs.append(copy.deepcopy(data))
 
   def call_D3D(self):
-    program_filepath = "/home/capsen/AIMS_D3D/DREAM3D-6.6.332.3886a295b-Linux-x86_64/bin/PipelineRunner"
-    json_filepath = "/home/capsen/Downloads/D3D/IncrementalFormingPipeline-LinuxTest.json"
+    program_filepath = "/home/capsen/AIMS_D3D/DREAM3D_FORGING_build02_20230118/bin/PipelineRunner"
+    json_filepath = "/home/capsen/ws_forge/src/D3D_planning/IncrementalFormingPipeline.json"
     subprocess.call([program_filepath, "-p", json_filepath])
 
 class Press():
   def __init__(self):
-
     # Enter IR temperature sensor calibration offset
     self.temperature_offset = 100
 
@@ -210,39 +209,8 @@ class Press():
       self.halt_press()
       raise ValueError('Press timeout before target reached', time.time(), start_time, timeout)
     else:
-      rospy.loginfo('Successfully pre press_with_force_fb(self, target, tolerance, timeout)')
-    # This function will publish a single target position and call relieve forces
-    # Results are mixed: relieve forces does not keep up well with press
-    if self.power_switch_state == False:
-      raise ValueError("Cannot execute press command with power switch off")
+      rospy.loginfo('Successfully pressed')
     
-    start_time = time.time()                      
-    press_complete = False         
-    
-    # Must call publish_once() rather than press() because cannot be blocking call
-    # otherwise, could not check FT sensor while moving press
-    try:
-      self.publish_once(target)
-    except ValueError as err:
-      print(err.args)
-      raise ValueError('Failed to publish press target position')
-    
-    while (time.time() - start_time) < timeout and press_complete == False:
-      if abs(target - float(self.position)) < tolerance:
-        rospy.loginfo('Successfully pressed to %f', target)
-        press_complete = True
-      else:
-        try: 
-          forging_client.relieve_forces()
-        except ValueError as err:
-          self.halt_press()
-          print(err.args)
-          raise ValueError('Upper force limit detected before target reached', target, self.position)
-      
-    if (time.time() - start_time) > timeout:
-      self.halt_press()
-      # raise ValueError('Press timeout before target reached', time.time(), start_time, timeout)
-
   def press_in_steps(self, target):
     # This function breaks a single press target position into multiple steps, calling relieve forces after each step
     # Requires that the target position is lower (higher position value) than current position
@@ -263,32 +231,31 @@ class Press():
       raise RuntimeError("press_in_steps cannot execute press command with power switch off")
 
     try: 
-      start_position = copy.deepcopy(self.position())
+      start_position = copy.deepcopy(self.position)
     except:
       raise RuntimeError('press_in_steps could not determine current press position')
     
     #initialize target to starting position
     step_target = start_position
 
-    while (target > self.position()) and (time.time() - start_time < timeout):
-      if (target - self.position()) > step_dist:
+    while (target > self.position) and (time.time() - start_time < timeout):
+      if (target - self.position) > step_dist:
         step_target += step_dist
       else:
         step_target = target
       
       try:
-        self.publish_once(step_target)
+        self.press(step_target, press_down_tolerance, press_down_timeout)
       except ValueError as err:
         print(err.args)
         raise RuntimeError('press_in_steps failed to publish press target position')
       
-      while (step_target > self.position()) and (time.time() - start_time < timeout):
-        try: 
-          forging_client.relieve_relative_forces(fx_tare, fy_tare, fz_tare, tx_tare, ty_tare, tz_tare)
-        except ValueError as err:
-          self.halt_press()
-          print(err.args)
-          raise ValueError("press_in_steps failed call to relieve_relative_forces")
+      try: 
+        forging_client.relieve_relative_forces(fx_tare, fy_tare, fz_tare, tx_tare, ty_tare, tz_tare)
+      except ValueError as err:
+        self.halt_press()
+        print(err.args)
+        raise ValueError("press_in_steps failed call to relieve_relative_forces")
         
     if (time.time() - start_time) > timeout:
         self.halt_press()
@@ -314,53 +281,14 @@ class Press():
     else:
       raise ValueError("press_incremental cannot execute zero distance move", increment)
 
-  def press_incremental_with_force_fb(self, increment):
-    if self.position is None:
-      raise ValueError("Cannot obtain press position for incremental move", increment)
-    elif increment > 0:
-      try:
-        self.press_down_in_steps_with_force_fb(self.position + increment)
-      except ValueError as err:
-        print(err.args)
-        raise ValueError('press_incremental_with_force_fb failed')
-    else:
-      raise ValueError("Cannot press up with force feedback. Requires positive, non-zero increment", increment)
- 
-  def seek_part_contact(self):
-
-    rospy.loginfo("Entered seek_part_contact")
-    
-    if not ft_sensor.is_publishing():
-      raise ValueError("seek_part_contact determined that ft sensor not publishing")
-
-    # df_threshold is change in force (N) that indicates successfully found bottom
-    df_threshold = 5.0
-    dt_threshold = 1.0
-
-    dist_increment = .005
-    start_force = copy.deepcopy(ft_sensor.force.z)
-    start_torque = copy.deepcopy(ft_sensor.torque.y)
-    start_position = copy.deepcopy(self.position)
-    target_position = start_position
-
-    contact_made = False
-
-    while not contact_made:
-      at_target_position = abs(self.position - target_position) < press_down_tolerance
-      if at_target_position:
-        target_position += dist_increment
-        self.publish_once(target_position)
-      contact_made = abs(ft_sensor.force.z - start_force) >= df_threshold or abs(ft_sensor.torque.y - start_torque) >= dt_threshold
-    
-    press_position = self.halt_press()
-    rospy.loginfo("Seek_part_contact succeeded")
-    return press_position
-
   def seek_press_bottom(self):
 
     rospy.loginfo("Entered seek_press_bottom")
+    
+    if self.power_switch_state == False:
+      raise ValueError('Cannot execute press command with power switch off')
 
-    dist_increment = .050
+    dist_increment = .200
     timeout = 5
     start_position = copy.deepcopy(self.position)
     target_position = start_position
@@ -385,10 +313,27 @@ class FTSensor:
   def __init__(self):
     # ROS subscribers
     self.ft_sub = rospy.Subscriber('/transformed_world', WrenchStamped, self.ft_callback)
+    self.time = None
 
-    self.max_allowed_torque = 10.0 # N-m, limited by GP7 T axis
-    self.max_allowed_force = 69.0 # N, limited by GP7 max payload (7kg)
-  
+    # baseline describes the observed readings at room temp (29.4C at flange) holding workpiece
+    # used to calculate corrected values when thermal changes occur
+    self.baseline = WrenchStamped()
+    self.baseline.wrench.force.x = 13.8
+    self.baseline.wrench.force.y = 12.0
+    self.baseline.wrench.force.z = -40.3
+    self.baseline.wrench.torque.x = -1.1
+    self.baseline.wrench.torque.y = 3.9
+    self.baseline.wrench.torque.z = 0.1
+
+    self.corrected = WrenchStamped()
+
+    self.fx_shift = 0.0
+    self.fy_shift = 0.0
+    self.fz_shift = 0.0
+    self.tx_shift = 0.0
+    self.ty_shift = 0.0
+    self.tz_shift = 0.0
+
   def ft_callback(self, data):
     self.wrench = data.wrench
     self.force = data.wrench.force
@@ -396,11 +341,31 @@ class FTSensor:
     self.header = data.header
     self.time = data.header.stamp
 
+    self.corrected.wrench.force.x = self.wrench.force.x - self.fx_shift
+    self.corrected.wrench.force.y = self.wrench.force.y - self.fy_shift
+    self.corrected.wrench.force.z = self.wrench.force.z - self.fz_shift
+    self.corrected.wrench.torque.x = self.wrench.torque.x - self.tx_shift
+    self.corrected.wrench.torque.y = self.wrench.torque.y - self.ty_shift
+    self.corrected.wrench.torque.z = self.wrench.torque.z - self.tz_shift
+    
+  def set_shift(self, input_wrench):
+    self.fx_shift = input_wrench.force.x - self.baseline.wrench.force.x
+    self.fy_shift = input_wrench.force.y - self.baseline.wrench.force.y
+    self.fz_shift = input_wrench.force.z - self.baseline.wrench.force.z
+    self.tx_shift = input_wrench.torque.x - self.baseline.wrench.torque.x
+    self.ty_shift = input_wrench.torque.y - self.baseline.wrench.torque.y
+    self.tz_shift = input_wrench.torque.z - self.baseline.wrench.torque.z
+
   def is_publishing(self):
     # checks to see whether the subscriber callback has executed more recently than timeout value
-    timeout = 0.1
-    if rospy.get_time() - self.time < timeout:
-      return True
+    timeout = 5
+
+    if self.time is not None:
+      ros_time = rospy.get_rostime()
+      msg_time = self.time
+      elapsed_time = (ros_time.secs - msg_time.secs)
+      if elapsed_time < timeout:
+        return True
     else:
       return False
 
@@ -418,6 +383,76 @@ class ForgingClient:
 
     self._set_collision_checking_client = rospy.ServiceProxy(
         '/planner/set_collision_checking_service', SetProperty)
+
+    self.home = Pose()
+    self.home.position.x = 0.300
+    self.home.position.y = 0.000
+    self.home.position.z = 0.185
+    self.home.orientation.x = 0
+    self.home.orientation.y = 0.7071
+    self.home.orientation.z = 0.0
+    self.home.orientation.w = 0.7071
+
+    self.furnace_approach = Pose()
+    self.furnace_approach.position.x = -0.3363
+    self.furnace_approach.position.y = -0.5798
+    self.furnace_approach.position.z = 0.4000
+    self.furnace_approach.orientation.x = 0.0019
+    self.furnace_approach.orientation.y = -0.0052
+    self.furnace_approach.orientation.z = 0.8660
+    self.furnace_approach.orientation.w = -0.5000
+
+    self.furnace_pick = Pose()
+    self.furnace_pick.position.x = -0.4859
+    self.furnace_pick.position.y = -0.8389
+    self.furnace_pick.position.z = 0.4000
+    self.furnace_pick.orientation.x = 0.0019
+    self.furnace_pick.orientation.y = -0.0052
+    self.furnace_pick.orientation.z = 0.8660
+    self.furnace_pick.orientation.w = -0.5000
+
+    xy_ratio = (self.furnace_approach.position.x - self.furnace_pick.position.x) / (self.furnace_approach.position.y - self.furnace_pick.position.y)
+
+    self.pick_approach = copy.deepcopy(self.furnace_pick)
+    self.pick_approach.position.y += 0.025
+    self.pick_approach.position.x += (0.025 * xy_ratio)
+
+    self.pick_lift = copy.deepcopy(self.furnace_pick)
+    self.pick_lift.position.z += 0.03
+
+    self.furnace_depart = copy.deepcopy(self.pick_lift)
+    self.furnace_depart.position.y += 0.280
+    self.furnace_depart.position.x += (0.280 * xy_ratio)
+
+    # self.furnace_depart = Pose()
+    # self.furnace_depart.position.x = -0.3234
+    # self.furnace_depart.position.y = -0.5580
+    # self.furnace_depart.position.z = 0.4500
+    # self.furnace_depart.orientation.x = -0.0019
+    # self.furnace_depart.orientation.y = 0.00052
+    # self.furnace_depart.orientation.z = -0.8660
+    # self.furnace_depart.orientation.w = 0.5000
+
+    self.waypoint1 = Pose()
+    self.waypoint1.position.x = 0.302
+    self.waypoint1.position.y = -0.570
+    self.waypoint1.position.z = 0.427
+    self.waypoint1.orientation.x = -0.004
+    self.waypoint1.orientation.y = 0.0004
+    self.waypoint1.orientation.z = -0.515
+    self.waypoint1.orientation.w = 0.857
+
+    self.press_approach = Pose()
+    self.press_approach.position.x = 0.801
+    self.press_approach.position.y = -0.173
+    self.press_approach.position.z = 0.200
+    self.press_approach.orientation.x = 0.0
+    self.press_approach.orientation.y = 0.0
+    self.press_approach.orientation.z = 0.0
+    self.press_approach.orientation.w = 1.0
+
+    self.press_approach_far = copy.deepcopy(self.press_approach)
+    self.press_approach_far.position.x -= 0.100
 
   def set_io(self, name, activate):
     # name must match the second column of exactly one of the rows in io_map.csv
@@ -463,22 +498,24 @@ class ForgingClient:
       print(err.args)
       raise ValueError('move_incremental failed to move robot as expected')
 
-  def move_to_position_names(self, speed):
+  def move_to_position_name(self, position_name, speed):
     """
     Parameters
     ----------
     speed : float
       A decimal value in [0,1] that commands the robot speed as a proportion of
       its max speed
+
+    name: string
+      must match a name specified in file action_locations.csv 
+      supply arg in quotes
     """
     # Make a separate call to the service for each position in the list.
-    for position_name in POSITION_NAMES:
-      response = self._move_to_joint_positions_client(
+    response = self._move_to_joint_positions_client(
           type=1, name=position_name, abs_value=speed)
 
-      if response.error:
-        print("failed to move to joint position: %s"%response.error)
-        break
+    if response.error:
+      raise ValueError("failed to move to joint position: %s"%response.error)
 
   def move_to_scanning_positions(self, speed):
     """
@@ -504,62 +541,37 @@ class ForgingClient:
 
     pose : geometry_msgs/Pose.msg
     """
+
     response = self._move_link_to_pose_client(link="object_link", pose=pose, speed=speed)
 
     if response.error:
       print("failed to move object to pose: %s"%response.error)
-
-    start_time = time.time()
-    timeout = 10
-    pose_mismatch = True
-    pos_err_threshold = .001
-    rot_err_threshold = .002
-    while (time.time() - start_time) < timeout and pose_mismatch == True:
-      try:
-        current_pose = self.get_current_pose()
-      except ValueError as err:
-        print(err.args)
-        raise ValueError('unable to determine current pose')
-
-      x_err = abs(pose.position.x - current_pose.position.x)
-      y_err = abs(pose.position.y - current_pose.position.y)
-      z_err = abs(pose.position.z - current_pose.position.z)
-      rx_err = abs(pose.orientation.x - current_pose.orientation.x)
-      ry_err = abs(pose.orientation.y - current_pose.orientation.y)
-      rz_err = abs(pose.orientation.z - current_pose.orientation.z)
-      rw_err = abs(pose.orientation.w - current_pose.orientation.w)
-
-      pos_err = x_err + y_err + z_err
-      rot_err = rx_err + ry_err + rz_err + rw_err
-
-      if pos_err < pos_err_threshold and rot_err < rot_err_threshold:
-        pose_mismatch = False
-
-      time.sleep(0.01)
-    
-    if (time.time() - start_time) >= timeout:
-      raise ValueError('Timeout moving to object pose')
-    else:
-    #   rospy.loginfo('Successfully moved to target object pose')
-    #   rospy.loginfo('Position error = {}; Rotation error = {}'.format(pos_err, rot_err))
-      pass
+      raise
   
   def get_current_pose(self):
+    
     tf_listener = tf.TransformListener()
     pose = Pose()
-    try:
-      tf_listener.waitForTransform('/base_link','/object_link',rospy.Time(0), rospy.Duration(4.0))
-      (pos, rot) = tf_listener.lookupTransform('/base_link', '/object_link', rospy.Time(0))
-      pose.position.x = pos[0]
-      pose.position.y = pos[1]
-      pose.position.z = pos[2]
-      pose.orientation.x = rot[0]
-      pose.orientation.y = rot[1]
-      pose.orientation.z = rot[2]
-      pose.orientation.w = rot[3]
-      return pose
-    except:
-      raise ValueError('Get_current_pose failed')
+
+    attempt = 1
+    max_attempts = 5
+
+    while attempt <= max_attempts:
+      try:
+        tf_listener.waitForTransform('/base_link','/object_link',rospy.Time(0), rospy.Duration(4.0))
+        (pos, rot) = tf_listener.lookupTransform('/base_link', '/object_link', rospy.Time(0))
+        pose.position.x = pos[0]
+        pose.position.y = pos[1]
+        pose.position.z = pos[2]
+        pose.orientation.x = rot[0]
+        pose.orientation.y = rot[1]
+        pose.orientation.z = rot[2]
+        pose.orientation.w = rot[3]
+        return pose
+      except:
+        attempt += 1
+        if attempt > 2:
+          raise ValueError('Get_current_pose failed') 
 
   def seek_down(self):
     rospy.loginfo("starting seek_down")
@@ -686,36 +698,22 @@ class ForgingClient:
 
     move_speed = 0.01
 
-    fx = ft_sensor.force.x
-    fy = ft_sensor.force.y
-    fz = ft_sensor.force.z
-    tx = ft_sensor.torque.x
-    ty = ft_sensor.torque.y
-    tz = ft_sensor.torque.z
+    fx_net = ft_sensor.force.x - fx_tare
+    fy_net = ft_sensor.force.y - fy_tare
+    fz_net = ft_sensor.force.z - fz_tare
+    tx_net = ft_sensor.torque.x - tx_tare
+    ty_net = ft_sensor.torque.y - ty_tare
+    tz_net = ft_sensor.torque.z - tz_tare
 
-    fx_net = fx - fx_tare
-    fy_net = fy - fy_tare
-    fz_net = fz - fz_tare
-    tx_net = tx - tx_tare
-    ty_net = ty - ty_tare
-    tz_net = tz - tz_tare
-
-    rospy.loginfo("Start: fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
+    rospy.loginfo("Net start: fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx_net, fy_net, fz_net, tx_net, ty_net, tz_net))
 
     # will attempt to adjust robot pose by dist_increment if between lower and upper threshold
     # will raise error if above upper threshold
     lower_force_threshold = 10
-    upper_force_threshold = 80
+    upper_force_threshold = 60
     lower_torque_threshold = 1
-    upper_torque_threshold = 8
+    upper_torque_threshold = 6
     dist_increment = .0005
-
-    # Check upper thresholds and raise error if exceeded
-    if (abs(fx_net) > upper_force_threshold) or (abs(fy_net) > upper_force_threshold) or (
-      abs(fz_net) > upper_force_threshold or abs(tx_net) > upper_torque_threshold) or (
-      abs(ty_net) > upper_torque_threshold) or (abs(tz_net) > upper_torque_threshold):
-        rospy.loginfo("fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-        raise ValueError("relieve_relative_forces error: exceeded upper force limit") 
 
     # initialize target_pose (modified later)
     try:
@@ -736,13 +734,17 @@ class ForgingClient:
     # Continue checking and relieving forces until relieved or until relief moves fail to provide relief
     while 1 in move_list or -1 in move_list:
 
+      if (abs(fx_net) > upper_force_threshold) or (abs(fy_net) > upper_force_threshold) or (
+        abs(fz_net) > upper_force_threshold or abs(tx_net) > upper_torque_threshold) or (
+        abs(ty_net) > upper_torque_threshold) or (abs(tz_net) > upper_torque_threshold):
+          rospy.loginfo("Raw force data:  fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(ft_sensor.force.x, ft_sensor.force.y, ft_sensor.force.z, ft_sensor.torque.x, ft_sensor.torque.y, ft_sensor.torque.z))
+          rospy.loginfo("Raw force data:  fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(ft_sensor.force.x, ft_sensor.force.y, ft_sensor.force.z, ft_sensor.torque.x, ft_sensor.torque.y, ft_sensor.torque.z))
+          raise ValueError("relieve_relative_forces error: exceeded upper force limit")
+
       # record starting forces and torques for later comparison
-      fx_start = copy.deepcopy(fx)
-      fy_start = copy.deepcopy(fy)
-      fz_start = copy.deepcopy(fz)
-      tx_start = copy.deepcopy(tx)
-      ty_start = copy.deepcopy(ty)
-      tz_start = copy.deepcopy(tz)
+      fx_start = copy.deepcopy(ft_sensor.force.x)
+      fy_start = copy.deepcopy(ft_sensor.force.y)
+      fz_start = copy.deepcopy(ft_sensor.force.z)
 
       # determine relief directions
       # consider whether last attempt to relieve actually relieved forces
@@ -773,6 +775,7 @@ class ForgingClient:
         target_pose.position.z += (z_dir*dist_increment)
 
         try:
+          rospy.loginfo("moving to relieve forces. target = {}".format(target_pose))
           self.move_scanning_object_to_pose(target_pose, move_speed)
         except ValueError as err:
           print(err.args)
@@ -780,77 +783,73 @@ class ForgingClient:
         
         # Check whether the move actually relieved force as intended
         # Reset flags to True if no motion was executed in corresponding direction
+        fx_net = ft_sensor.force.x - fx_tare
+        fy_net = ft_sensor.force.y - fy_tare
+        fz_net = ft_sensor.force.z - fz_tare
+        tx_net = ft_sensor.torque.x - tx_tare
+        ty_net = ft_sensor.torque.y - ty_tare
+        tz_net = ft_sensor.torque.z - tz_tare
+
         if x_dir == -1:
-          x_neg_success = (fx_net > fx_start)
+          x_neg_success = (ft_sensor.force.x > fx_start)
           x_pos_success = True
         elif x_dir == 1:
-          x_pos_success = (fx_net < fx_start)
+          x_pos_success = (ft_sensor.force.x < fx_start)
           x_neg_success = True
         else:
           x_neg_success = True
           x_pos_success = True
 
         if y_dir == -1:
-          y_neg_success = (fy_net > fy_start)
+          y_neg_success = (ft_sensor.force.y > fy_start)
           y_pos_success = True
         elif y_dir == 1:
-          y_pos_success = (fy_net < fy_start)
+          y_pos_success = (ft_sensor.force.y < fy_start)
           y_neg_success = True
         else:
           y_neg_success = True
           y_pos_success = True
 
         if z_dir == -1:
-          z_neg_success = (fz_net > fz_start)
+          z_neg_success = (ft_sensor.force.z > fz_start)
           z_pos_success = True
         elif z_dir == 1:
-          z_pos_success = (fz_net < fz_start)
+          z_pos_success = (ft_sensor.force.z < fz_start)
           z_neg_success = True
         else:
           z_neg_success = True
           z_pos_success = True
 
-        success_flags = [x_neg_success, x_pos_success, y_neg_success, y_pos_success, z_neg_success, z_pos_success]
-
       else:
-        if False in success_flags:
-          rospy.loginfo("Last attempt to relieve a force failed {}".format(success_flags))
-        else:
-          # no forces present to be relieved
-          pass
+        rospy.loginfo("Successfully relieved forces")
 
   def retrieve_part_from_furnace(self):
-    pick = Pose()
-    pick.position.x = 0.728
-    pick.position.y = -0.207
-    pick.position.z = 0.204
-    pick.orientation.x = 0.0
-    pick.orientation.y = 0.0
-    pick.orientation.z = 0.0
-    pick.orientation.w = 1.0
-    
-    furnace_approach = copy.deepcopy(pick)
-    furnace_approach.position.y += 0.2
-    furnace_approach.position.x += 0.2
+    move_speed = 0.03
+    try:
+      open_furnace()
+      open_gripper()
+      forging_client.move_scanning_object_to_pose(forging_client.waypoint1, move_speed)
+      forging_client.move_scanning_object_to_pose(forging_client.furnace_approach, move_speed)
+      forging_client.move_scanning_object_to_pose(forging_client.pick_approach, move_speed)
+      forging_client.move_scanning_object_to_pose(forging_client.furnace_pick, move_speed)
+      # time.sleep(1)
+      close_gripper()
+      forging_client.move_scanning_object_to_pose(forging_client.pick_lift, move_speed)
+      forging_client.move_scanning_object_to_pose(forging_client.furnace_depart, move_speed)
+      forging_client.move_scanning_object_to_pose(forging_client.waypoint1, move_speed)
+      close_furnace()
+      
+    except ValueError as err:
+      print(err.args)
+      raise ValueError("retrieve_part_from_furnace failed")
 
-    pick_approach = copy.deepcopy(pick)
-    pick_approach.position.x += 0.030
-    pick_approach.position.y += 0.030
-
-    pick_lift = copy.deepcopy(pick)
-    pick_lift.position.z += 0.020
-
-    pick_depart = copy.deepcopy(pick_lift)
-    pick_depart.position.x += 0.05
-
-    waypoint1 = Pose()
-    waypoint1.position.x = 0.801
-    waypoint1.position.y = -0.173
-    waypoint1.position.z = 0.200
-    waypoint1.orientation.x = 0.0
-    waypoint1.orientation.y = 0.0
-    waypoint1.orientation.z = 0.0
-    waypoint1.orientation.w = 1.0
+  def change_orientation(self, qx, qy, qz, qw):
+    pose = self.get_current_pose()
+    pose.orientation.x = qx
+    pose.orientation.y = qy
+    pose.orientation.z = qz
+    pose.orientation.w = qw
+    forging_client.move_scanning_object_to_pose(pose, 0.03)
 
 # Initialize
 rospy.init_node('forge_gp7_node')
@@ -861,15 +860,36 @@ ft_sensor = FTSensor()
 press_schedule = PressSchedule()
 
 
-rospy.loginfo("Waiting for press position")
-got_press_position = False
-while got_press_position == False:
-  try:
-    rospy.loginfo("Starting press position is {}".format(p.position))
-  except:
-    time.sleep(1)
-  else:
-    got_press_position = True
+# rospy.loginfo("Waiting for press position")
+# got_press_position = False
+# while got_press_position == False:
+#   try:
+#     rospy.loginfo("Starting press position is {}".format(p.position))
+#   except:
+#     time.sleep(1)
+#   else:
+#     got_press_position = True
+
+#######################
+# F-T sensor test
+while ft_sensor.is_publishing() == False:
+  print("Waiting for F-T sensor")
+  time.sleep(1)
+ft_sensor.set_shift(ft_sensor.wrench)
+
+# while True:
+#   print("Raw = {}".format(ft_sensor.wrench))
+#   print("Corrected = {}".format(ft_sensor.corrected.wrench))
+#   time.sleep(1)
+
+#######################
+# Press Test
+p.press(0.05, press_up_tolerance, press_up_timeout)
+p.press_in_steps(0.07)
+
+raise SystemExit
+########################
+
 
 ########
 # Main #
@@ -894,109 +914,134 @@ def main():
   # enable or disable collision checking for a specified link
   rospy.wait_for_service('/planner/set_collision_checking_service')
 
-  do_presssing = False
 
-  if do_presssing:
- 
-
-    # Move upper die to contact bottom die; return press position at bottom
+  # Move upper die to contact bottom die; return press position at bottom
+  try:
     press_bottom = p.seek_press_bottom()
-    # Move upper die back up by some amount
-    p.press(press_top, press_up_tolerance, press_up_timeout)
+  except ValueError as err:
+    print(err.args)
+    raise SystemExit
 
-    # RETRIEVE PART FROM FURNACE
+  # Move upper die back up by some amount
+  try:
+    p.press(press_top, press_up_tolerance, press_up_timeout)
+  except ValueError as err:
+    print(err.args)
+    raise SystemExit
+
+  # # RETRIEVE PART FROM FURNACE
+  # try:
+  #   forging_client.retrieve_part_from_furnace()
+  # except ValueError as err:
+  #   print(err.args)
+  #   raise SystemExit
+
+  # SCAN PART
+  forging_client.move_to_scanning_positions(0.03)
+
+  # CALL D3D
+  press_schedule.call_D3D()
+
+  press_schedule.read_hdf5_file()
+
+  while press_schedule.keep_pressing:
+
+    press_schedule.keep_pressing = False
+
+    for index, value in enumerate(zip(press_schedule.poses.poses, press_schedule.hitMags, press_schedule.minZs, press_schedule.maxZs)):
+      pose = value[0]
+      hitMag = value[1]
+      minZ = value[2]
+      maxZ = value[3]
+      part_thickness = maxZ - minZ
+
+      move_speed = 0.03
+      press_entry_z_offset = .050
+      seek_down_z_offset = 0.010
+
+      press_start_offset = .010
+      press_start = press_bottom - part_thickness - press_start_offset
+      press_target = press_bottom - part_thickness + hitMag
+
+      if index == 0:
+        # only execute this for first pose in the list
+        # move part to press_entry, which is first press location + entry z-offset
+        entry_pose = copy.deepcopy(pose)
+        entry_pose.position.z += press_entry_z_offset
+        try:
+          forging_client.move_to_position_name("waypoint1", move_speed)
+          forging_client.move_scanning_object_to_pose(forging_client.press_approach_far, move_speed)
+          forging_client.move_scanning_object_to_pose(entry_pose, move_speed)
+        except ValueError as err:
+          print(err.args)
+          rospy.logerr("Failed to reach position target {} with value {}".format(index, value))
+          raise SystemExit
+      
+      # move part to seek_down_start, which is first press location + seek_start z-offset
+      seek_down_pose = copy.deepcopy(pose)
+      seek_down_pose.position.z += seek_down_z_offset
+
+      try:
+        forging_client.move_scanning_object_to_pose(seek_down_pose, move_speed)
+      except ValueError as err:
+        print(err.args)
+        rospy.logerr("Failed to reach seek_down_pose of position target {} with value {}".format(index, value))
+        raise SystemExit
+
+      # move part to contact lower die using force feedback
+      try:
+        forging_client.seek_down()
+      except ValueError as err:
+        print(err.args)
+        rospy.logerr("Failed to reach seek_down_pose of position target {} with value {}".format(index, value))
+        raise SystemExit
+
+      # move press to press_start, which is above part by amount press_start_offset
+      try: 
+        p.press(press_start, press_down_tolerance, press_down_timeout)
+      except ValueError as err:
+          print(err.args)
+          raise SystemExit
+
+      # press part
+      try: 
+        p.press_in_steps(press_target)
+      except ValueError as err:
+          print(err.args)
+      except RuntimeError as err:
+        print(err.args)
+        raise SystemExit
+
+      # # move press back up
+      try: 
+        p.press(press_top, press_up_tolerance, press_up_timeout)
+      except ValueError as err:
+          print(err.args)
+          raise SystemExit
+      
+      # raise part off of lower die before moving to next seek_down_start
+      try:
+        forging_client.move_incremental(0,0,seek_down_z_offset)
+      except ValueError as err:
+        print(err.args)
+        rospy.logerr("Failed to raise part off of lower die")
+        raise SystemExit
+
+    # leave press
+    forging_client.move_incremental(0, 0, .05)
+    forging_client.move_incremental(-.150, 0, 0)
+    forging_client.move_scanning_object_to_pose(forging_client.press_approach_far, move_speed)
+    forging_client.move_to_position_name("waypoint1", move_speed)
+
     # SCAN PART
+    forging_client.move_to_scanning_positions(0.03)
+
     # CALL D3D
+    press_schedule.call_D3D()
 
     press_schedule.read_hdf5_file()
 
-    while press_schedule.keep_pressing:
-
-      for index, value in enumerate(zip(press_schedule.poses.poses, press_schedule.press_targets, press_schedule.minZs, press_schedule.maxZs)):
-        pose = value[0]
-        hitMag = value[1]
-        minZ = value[2]
-        maxZ = value[3]
-        part_thickness = maxZ - minZ
-
-        move_speed = 0.03
-        press_entry_z_offset = .050
-        seek_down_z_offset = 0.010
-
-        press_start_offset = .010
-        press_start = press_bottom + part_thickness + press_start_offset
-        press_target = press_bottom + part_thickness - hitMag
-
-        if index == 0:
-          # only execute this for first pose in the list
-          # move part to press_entry, which is first press location + entry z-offset
-          entry_pose = copy.deepcopy(pose)
-          entry_pose.position.z += press_entry_z_offset
-          try:
-            forging_client.move_scanning_object_to_pose(entry_pose, move_speed)
-          except ValueError as err:
-            print(err.args)
-            rospy.logerr("Failed to reach position target {} with value {}".format(index, value))
-            raise SystemExit
-        
-        # move part to seek_down_start, which is first press location + seek_start z-offset
-        seek_down_pose = copy.deepcopy(pose)
-        seek_down_pose.position.z += seek_down_z_offset
-
-        try:
-          forging_client.move_scanning_object_to_pose(seek_down_pose, move_speed)
-        except ValueError as err:
-          print(err.args)
-          rospy.logerr("Failed to reach seek_down_pose of position target {} with value {}".format(index, value))
-          raise SystemExit
-
-        # move part to contact lower die using force feedback
-        try:
-          forging_client.seek_down()
-        except ValueError as err:
-          print(err.args)
-          rospy.logerr("Failed to reach seek_down_pose of position target {} with value {}".format(index, value))
-          raise SystemExit
-
-        # move press to press_start, which is above part by amount press_start_offset
-        try: 
-          p.press(press_start, press_down_tolerance, press_down_timeout)
-        except ValueError as err:
-            print(err.args)
-            raise SystemExit
-
-        # press part
-        try: 
-          p.press_in_steps(press_target)
-        except ValueError as err:
-            print(err.args)
-        except RuntimeError as err:
-          print(err.args)
-          raise SystemExit
-
-        # move press back up
-        try: 
-          p.press(press_top)
-        except ValueError as err:
-            print(err.args)
-            raise SystemExit
-        
-        # raise part off of lower die before moving to next seek_down_start
-        try:
-          forging_client.move_incremental(0,0,0.02)
-        except ValueError as err:
-          print(err.args)
-          rospy.logerr("Failed to raise part off of lower die")
-          raise SystemExit
-
-      # SCAN PART
-      # CALL D3D
-      press_schedule.read_hdf5_file()
-
-
-  else:
-    # forging_client.move_scanning_object_to_pose(waypoint1, move_speed)
-    pass
+    press_schedule.keep_pressing = False
 
 if __name__ == "__main__":
   main()

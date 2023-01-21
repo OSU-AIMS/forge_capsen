@@ -86,7 +86,7 @@ class ForgingClient:
     target_pose.position.y += dy
     target_pose.position.z += dz
     try:
-      self.move_scanning_object_to_pose(move_speed, target_pose)
+      self.move_scanning_object_to_pose(target_pose, move_speed)
     except ValueError as err:
       print(err.args)
       raise ValueError('move_incremental failed to move robot as expected')
@@ -122,7 +122,7 @@ class ForgingClient:
     if response.error:
       print("failed to move to scanning positions: %s"%response.error)
 
-  def move_scanning_object_to_pose(self, speed, pose):
+  def move_scanning_object_to_pose(self, pose, speed):
     """
     Parameters
     ----------
@@ -189,203 +189,6 @@ class ForgingClient:
     except:
       raise ValueError('Get_current_pose failed')
 
-  def seek_down(self):
-    rospy.loginfo("starting seek_down")
-    
-    move_speed = 0.01
-
-    if not ft_sensor.is_publishing():
-      raise ValueError("seek_down determined that ft sensor not publishing")
-
-    # df_threshold is change in force (N) that indicates successfully found bottom
-    df_threshold = 5.0
-    # max_dist is maximum distance (m) allowed to travel to find bottom
-    max_dist = 0.050
-    # target_dist will be incremented by dist_increment with each step down
-    target_dist = 0.0
-    dist_increment = .001
-  
-    start_force = copy.deepcopy(ft_sensor.force.z)
-
-    try:
-      seek_start_pose = copy.deepcopy(self.get_current_pose())
-    except ValueError as err:
-      print(err.args)
-      raise ValueError("seek_down cannot determine seek_start_pose")
-
-    print("start_force = {}".format(start_force))
-    if (start_force > -2.0):
-      rospy.logwarn("Seek_down starting force is higher than expected", ft_sensor.force.z)
-
-    target_pose = copy.deepcopy(seek_start_pose)
-    
-    while abs(ft_sensor.force.z - start_force) < df_threshold and target_dist <= max_dist:
-      target_dist += dist_increment
-      print("z force = {}".format(ft_sensor.force.z))
-      target_pose.position.z = seek_start_pose.position.z - target_dist
-      try:
-        forging_client.move_scanning_object_to_pose(target_pose, move_speed)
-      except ValueError as err:
-        print(err.args)
-        raise ValueError("seek_down failed to move robot as expected")
-    if (target_dist > max_dist):
-      raise ValueError("seek_down failed; exceeded max seek distance", max_dist)
-    else:
-      rospy.loginfo("Seek_down succeeded. Z Force = {}".format(ft_sensor.force.z))
-
-  def relieve_forces(self):
-    rospy.loginfo("Starting to relieve forces")
-
-    move_speed = .01
-
-    if not ft_sensor.is_publishing():
-      raise ValueError("relieve_forces determined that ft sensor not publishing")
-
-    fx = ft_sensor.force.x
-    fy = ft_sensor.force.y
-    fz = ft_sensor.force.z
-    tx = ft_sensor.torque.x
-    ty = ft_sensor.torque.y
-    tz = ft_sensor.torque.z
-    rospy.loginfo("fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-
-    lower_force_threshold = 30
-    upper_force_threshold = 80
-    upper_torque_threshold = 10
-
-    dist_increment = .0005
-    x_dir = 1
-    y_dir = 1
-    z_dir = 1
-    
-    while (abs(fx) > lower_force_threshold) or (abs(fy) > lower_force_threshold) or (abs(fz) > lower_force_threshold):
-      if (fx < -lower_force_threshold):
-        x_dir = -1
-      elif (fx > lower_force_threshold):
-        x_dir = 1
-      else:
-        x_dir = 0
-      if (fy < -lower_force_threshold):
-        y_dir = -1
-      elif (fy > lower_force_threshold):
-        y_dir = 1
-      else:
-        y_dir = 0
-      if (fz < -lower_force_threshold):
-        z_dir = -1
-      elif (fz > lower_force_threshold):
-        z_dir = 1
-      else:
-        z_dir = 0
-
-      try:
-        target_pose = copy.deepcopy(self.get_current_pose())
-      except ValueError as err:
-        print(err.args)
-        raise ValueError("Cannot determine current_pose to adjust to relieve forces")
-
-      target_pose.position.x += (x_dir*dist_increment)
-      target_pose.position.y += (y_dir*dist_increment)
-      target_pose.position.z += (z_dir*dist_increment)
-
-      try:
-        self.move_scanning_object_to_pose(target_pose, move_speed)
-      except ValueError as err:
-        print(err.args)
-        raise ValueError("relieve_forces failed to move scanning object to desired pose")
-
-      fx = ft_sensor.force.x
-      fy = ft_sensor.force.y
-      fz = ft_sensor.force.z
-      tx = ft_sensor.torque.x
-      ty = ft_sensor.torque.y
-      tz = ft_sensor.torque.z
-
-      if (abs(fx) > upper_force_threshold) or (abs(fy) > upper_force_threshold) or (abs(fz) > upper_force_threshold or abs(tx) > upper_torque_threshold) or (abs(ty) > upper_torque_threshold) or (abs(tz) > upper_torque_threshold):
-        rospy.loginfo("fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-        raise ValueError("relieve_forces failed; Exceeded upper force limit")    
-    
-    rospy.loginfo("relieve_forces succeeded")
-
-  def relieve_relative_forces(self, fx_start, fy_start, fz_start, tx_start, ty_start, tz_start):
-    rospy.loginfo("Reached relieve relative forces")
-    if not ft_sensor.is_publishing():
-      raise ValueError("relieve_relative_forces determined that ft sensor not publishing")
-
-    move_speed = 0.01
-
-    fx = ft_sensor.force.x
-    fy = ft_sensor.force.y
-    fz = ft_sensor.force.z
-    tx = ft_sensor.torque.x
-    ty = ft_sensor.torque.y
-    tz = ft_sensor.torque.z
-    rospy.loginfo("Start: fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-
-    # will attempt to adjust robot pose by dist_increment if between lower and upper threshold
-    # will raise error if above upper threshold
-    lower_force_threshold = 10
-    upper_force_threshold = 80
-    lower_torque_threshold = 1
-    upper_torque_threshold = 8
-    dist_increment = .0005
-
-    # Check upper thresholds and raise error if exceeded
-    if (abs(fx - fx_start) > upper_force_threshold) or (abs(fy - fy_start) > upper_force_threshold) or (
-      abs(fz - fz_start) > upper_force_threshold or abs(tx - tx_start) > upper_torque_threshold) or (
-      abs(ty - ty_start) > upper_torque_threshold) or (abs(tz - tz_start) > upper_torque_threshold):
-        rospy.loginfo("fx = {}, fy = {}, fz = {}, tx = {}, ty = {}, tz = {}".format(fx, fy, fz, tx, ty, tz))
-        raise ValueError("relieve_relative_forces error: exceeded upper force limit") 
-
-    try:
-      # initialize target_pose (modified later)
-      target_pose = copy.deepcopy(self.get_current_pose())
-    except ValueError as err:
-      print(err.args)
-      raise ValueError("relieve_relative_forces cannot determine current_pose")
-    
-    # initialize move_list to ensure we enter while loop
-    move_list = [1]
-    while 1 in move_list or -1 in move_list:
-      # determine relief directions   
-      if (fx - fx_start < -lower_force_threshold):
-        x_dir = -1
-      elif (fx - fx_start > lower_force_threshold):
-        x_dir = 1
-      else:
-        x_dir = 0
-      if (fy - fy_start < -lower_force_threshold):
-        y_dir = -1
-      elif (fy - fy_start > lower_force_threshold):
-        y_dir = 1
-      else:
-        y_dir = 0
-      if (fz - fz_start < -lower_force_threshold):
-        z_dir = -1
-      elif (fz - fx_start > lower_force_threshold):
-        z_dir = 1
-      else:
-        z_dir = 0
-
-      move_list = [x_dir, y_dir, z_dir]
-      if 1 in move_list or -1 in move_list:
-        
-        target_pose.position.x += (x_dir*dist_increment)
-        target_pose.position.y += (y_dir*dist_increment)
-        target_pose.position.z += (z_dir*dist_increment)
-
-        try:
-          self.move_scanning_object_to_pose(target_pose, move_speed)
-        except ValueError as err:
-          print(err.args)
-          raise ValueError("relieve_relative_forces failed to move scanning object to desired pose")
-        else:    
-          rospy.loginfo("relieve_relative_forces succeeded")
-
-      else:
-        # no forces present that need to be relieved
-        # rospy.loginfo("No forces to relieve")
-        pass
 
 class PressSchedule():
 
@@ -397,7 +200,12 @@ class PressSchedule():
     self.maxZs = []
 
   def read_hdf5_file(self):
-    with h5py.File('IncrementalFormingFullRun2.hdf5', 'r') as f:
+    with h5py.File('IncrementalFormingFullRun.hdf5', 'r') as f:
+      # keepPressing_dataset = f['keepPressing']
+      # if keepPressing_dataset[0] == False:
+      #   rospy.loginfo("Pressing complete!")
+      #   raise SystemExit
+      
       pose_dataset = f['poses']
       for data in pose_dataset:
         # print("Pose from hdf5 file: ", data)
@@ -449,10 +257,10 @@ def main():
     # print("minZ #{} = {}".format(index, minZ))
     # print("maxZ #{} = {}".format(index, maxZ))
     pose.position.z += 0.030
-    forging_client.move_scanning_object_to_pose(.02, pose)
+    forging_client.move_scanning_object_to_pose(pose, 0.02)
     pose.position.z -= 0.020
-    forging_client.move_scanning_object_to_pose(.02, pose)
-
+    forging_client.move_scanning_object_to_pose(pose, 0.02)
+    a = 1
 
 if __name__ == "__main__":
   main()
