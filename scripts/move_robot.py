@@ -267,15 +267,27 @@ def main():
     # open_furnace()
     # open_gripper()
 
-    print(forging_client.get_current_pose())
+    # print(forging_client.get_current_pose())
 
     # forging_client.move_to_position_name("waypoint1", 0.03)
 
     # SCAN PART
     # forging_client.move_to_scanning_positions(0.03)
 
-    # pose = forging_client.get_current_pose()
-    # pose.position.x -= 0.06
+    # forging_client.move_scanning_object_to_pose(forging_client.waypoint1, .03)
+
+    pose = forging_client.get_current_pose()
+    print(pose)
+    # pose.orientation.x=-0.3827
+    # pose.orientation.y=0.0
+    # pose.orientation.z=0.0
+    # pose.orientation.w=0.9239
+
+
+    # pose.position.z += .01
+    # forging_client.move_scanning_object_to_pose(pose, 0.03)
+
+    # pose.position.x -= 0.150
     # forging_client.move_scanning_object_to_pose(pose, 0.03)
 
     # forging_client.move_to_position_name("press_approach", 0.03)
